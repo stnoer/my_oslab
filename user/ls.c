@@ -50,7 +50,8 @@ void ls(char *path) {
       p = buf + strlen(buf);
       *p++ = '/';
       while (read(fd, &de, sizeof(de)) == sizeof(de)) {
-        if (de.inum == 0) continue;
+        if (de.inum == 0) 
+        continue;
         memmove(p, de.name, DIRSIZ);
         p[DIRSIZ] = 0;
         if (stat(buf, &st) < 0) {
@@ -71,6 +72,7 @@ int main(int argc, char *argv[]) {
     ls(".");
     exit(0);
   }
-  for (i = 1; i < argc; i++) ls(argv[i]);
+  for (i = 1; i < argc; i++) 
+  ls(argv[i]);
   exit(0);
 }
