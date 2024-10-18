@@ -13,7 +13,6 @@
 // * Only one process at a time can use a buffer,
 //     so do not keep them longer than necessary.
 
-
 #include "types.h"
 #include "param.h"
 #include "spinlock.h"
@@ -23,50 +22,68 @@
 #include "fs.h"
 #include "buf.h"
 
-struct {
-  struct spinlock lock;
-  struct buf buf[NBUF];
+#define NBUCKETS 13
 
+struct
+{
+  struct spinlock lock;
+  struct spinlock locks[NBUCKETS];
+  struct buf buf[NBUF];
   // Linked list of all buffers, through prev/next.
-  // Sorted by how recently the buffer was used.
-  // head.next is most recent, head.prev is least.
-  struct buf head;
+  // head.next is most recently used.
+  // struct buf head;
+  struct buf hashbucket[NBUCKETS]; // 每个哈希队列一个linked list及一个lock
 } bcache;
 
-void
-binit(void)
+void binit(void)
 {
   struct buf *b;
 
   initlock(&bcache.lock, "bcache");
 
+  char lockname[20];
+  for (int i = 0; i < NBUCKETS; i++)
+  {
+    snprintf(lockname, sizeof(lockname), "bcachelock%d", i);
+    initlock(&(bcache.locks[i]), lockname);
+  }
+
   // Create linked list of buffers
-  bcache.head.prev = &bcache.head;
-  bcache.head.next = &bcache.head;
-  for(b = bcache.buf; b < bcache.buf+NBUF; b++){
-    b->next = bcache.head.next;
-    b->prev = &bcache.head;
+  for (int i = 0; i < NBUCKETS; i++)
+  {
+    bcache.hashbucket[i].prev = &bcache.hashbucket[i];
+    bcache.hashbucket[i].next = &bcache.hashbucket[i];
+  }
+
+  for (b = bcache.buf; b < bcache.buf + NBUF; b++)
+  {
+    b->next = bcache.hashbucket[0].next;
+    b->prev = &bcache.hashbucket[0];
     initsleeplock(&b->lock, "buffer");
-    bcache.head.next->prev = b;
-    bcache.head.next = b;
+    bcache.hashbucket[0].next->prev = b;
+    bcache.hashbucket[0].next = b;
   }
 }
 
 // Look through buffer cache for block on device dev.
 // If not found, allocate a buffer.
 // In either case, return locked buffer.
-static struct buf*
+static struct buf *
 bget(uint dev, uint blockno)
 {
-  struct buf *b;
+  struct buf *b = 0;
 
-  acquire(&bcache.lock);
+  int num = blockno % NBUCKETS;
+
+  acquire(&bcache.locks[num]);
 
   // Is the block already cached?
-  for(b = bcache.head.next; b != &bcache.head; b = b->next){
-    if(b->dev == dev && b->blockno == blockno){
+  for (b = bcache.hashbucket[num].next; b != &bcache.hashbucket[num]; b = b->next)
+  {
+    if (b->dev == dev && b->blockno == blockno)
+    {
       b->refcnt++;
-      release(&bcache.lock);
+      release(&bcache.locks[num]);
       acquiresleep(&b->lock);
       return b;
     }
@@ -74,28 +91,78 @@ bget(uint dev, uint blockno)
 
   // Not cached.
   // Recycle the least recently used (LRU) unused buffer.
-  for(b = bcache.head.prev; b != &bcache.head; b = b->prev){
-    if(b->refcnt == 0) {
+  for (b = bcache.hashbucket[num].prev; b != &bcache.hashbucket[num]; b = b->prev)
+  {
+    if (b->refcnt == 0)
+    {
       b->dev = dev;
       b->blockno = blockno;
       b->valid = 0;
       b->refcnt = 1;
-      release(&bcache.lock);
+      release(&bcache.locks[num]);
       acquiresleep(&b->lock);
       return b;
     }
   }
+
+  // Not cached in num-bucket
+  // select an unused cache from other buckets
+  release(&bcache.locks[num]);
+
+ 
+  //acquire(&bcache.locks[num]);
+ // int count = 0;
+  int i=(num + 1) % NBUCKETS;
+  for ( ; i != num; i = (i + 1) % NBUCKETS)
+  {
+    acquire(&bcache.lock);
+    acquire(&bcache.locks[i]);
+    for (b = bcache.hashbucket[i].next; b != &bcache.hashbucket[i]; b = b->prev)
+    {
+      if (b->refcnt == 0)
+      {
+        
+        b->dev = dev;
+        b->blockno = blockno;
+        b->valid = 0;
+        b->refcnt = 1;
+
+        b->prev->next = b->next;
+        b->next->prev = b->prev;
+
+        
+        acquire(&bcache.locks[num]);
+        b->next = bcache.hashbucket[num].next;
+        b->prev = &bcache.hashbucket[num];
+        bcache.hashbucket[num].next->prev = b;
+        bcache.hashbucket[num].next = b;
+
+        
+        release(&bcache.locks[num]);
+        release(&bcache.locks[i]);
+        release(&bcache.lock);
+        acquiresleep(&b->lock);
+        return b;
+      }
+    }
+    release(&bcache.locks[i]);
+    release(&bcache.lock);
+  }
+
+  //release(&bcache.locks[num]);
+  
   panic("bget: no buffers");
 }
 
 // Return a locked buf with the contents of the indicated block.
-struct buf*
+struct buf *
 bread(uint dev, uint blockno)
 {
   struct buf *b;
 
   b = bget(dev, blockno);
-  if(!b->valid) {
+  if (!b->valid)
+  {
     virtio_disk_rw(b, 0);
     b->valid = 1;
   }
@@ -103,51 +170,50 @@ bread(uint dev, uint blockno)
 }
 
 // Write b's contents to disk.  Must be locked.
-void
-bwrite(struct buf *b)
+void bwrite(struct buf *b)
 {
-  if(!holdingsleep(&b->lock))
+  if (!holdingsleep(&b->lock))
     panic("bwrite");
   virtio_disk_rw(b, 1);
 }
 
 // Release a locked buffer.
 // Move to the head of the most-recently-used list.
-void
-brelse(struct buf *b)
+void brelse(struct buf *b)
 {
-  if(!holdingsleep(&b->lock))
-    panic("brelse");
+  if (!holdingsleep(&b->lock))
+    panic("brelse"); 
 
   releasesleep(&b->lock);
 
-  acquire(&bcache.lock);
+  int num = b->blockno % NBUCKETS;
+  acquire(&bcache.locks[num]);
   b->refcnt--;
-  if (b->refcnt == 0) {
+  if (b->refcnt == 0)
+  {
     // no one is waiting for it.
+    
     b->next->prev = b->prev;
     b->prev->next = b->next;
-    b->next = bcache.head.next;
-    b->prev = &bcache.head;
-    bcache.head.next->prev = b;
-    bcache.head.next = b;
+    b->next = bcache.hashbucket[num].next;
+    b->prev = &bcache.hashbucket[num];
+    bcache.hashbucket[num].next->prev = b;
+    bcache.hashbucket[num].next = b;
   }
-  
-  release(&bcache.lock);
+
+  release(&bcache.locks[num]);
 }
 
-void
-bpin(struct buf *b) {
-  acquire(&bcache.lock);
+void bpin(struct buf *b)
+{
+  acquire(&bcache.locks[b->blockno % NBUCKETS]);
   b->refcnt++;
-  release(&bcache.lock);
+  release(&bcache.locks[b->blockno % NBUCKETS]);
 }
 
-void
-bunpin(struct buf *b) {
-  acquire(&bcache.lock);
+void bunpin(struct buf *b)
+{
+  acquire(&bcache.locks[b->blockno % NBUCKETS]);
   b->refcnt--;
-  release(&bcache.lock);
+  release(&bcache.locks[b->blockno % NBUCKETS]);
 }
-
-

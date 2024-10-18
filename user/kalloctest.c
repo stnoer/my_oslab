@@ -43,6 +43,7 @@ void test1(void)
   int n, m;
   printf("start test1\n");  
   m = ntas(0);
+
   for(int i = 0; i < NCHILD; i++){
     int pid = fork();
     if(pid < 0){
