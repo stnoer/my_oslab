@@ -379,3 +379,49 @@ int test_pagetable() {
   printf("test_pagetable: %d\n", satp != gsatp);
   return satp != gsatp;
 }
+
+void vmprint(pagetable_t pagetable, int height, int num) {
+  if (height == 0) {
+    uint64 page_table = (uint64)pagetable << PGSHIFT;
+    printf("page table %p\n", page_table);
+  }
+  for (int i = 0; i < 512; i++) {
+    pte_t pte = pagetable[i];
+    if (pte & PTE_V) {
+      printf("||");
+      for (int i = 0; i < height; i++) printf("   ||");
+      char flags[5];
+      flags[4] = '\0';
+      if ((pte & (PTE_R | PTE_W | PTE_X)) == 0) {
+        strncpy(flags, "----", 4);
+        printf("idx: %d: pa: %p, flags: %s\n", i, PTE2PA(pte), flags);
+        uint64 child = PTE2PA(pte);  // 将PTE转为为物理地址
+        if (height == 0)
+          vmprint((pagetable_t)child, height + 1, num + i * 512 * 512);
+        else
+          vmprint((pagetable_t)child, height + 1, num + i * 512);
+      } else {
+        if (pte & PTE_R)
+          flags[0] = 'r';
+        else
+          flags[0] = '-';
+        if (pte & PTE_W)
+          flags[1] = 'w';
+        else
+          flags[1] = '-';
+        if (pte & PTE_X)
+          flags[2] = 'x';
+        else
+          flags[2] = '-';
+        if (pte & PTE_U)
+          flags[3] = 'u';
+        else
+          flags[3] = '-';
+
+        uint64 va = (uint64)(i + num) << PGSHIFT;  // 假设页大小为4KB，左移12位
+        printf("idx: %d: va: %p -> pa: %p, flags: %s\n", i, va, PTE2PA(pte), flags);
+      }
+    }
+  }
+  return;
+}
