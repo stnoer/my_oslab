@@ -6,6 +6,7 @@
 #include "proc.h"
 #include "defs.h"
 
+
 struct cpu cpus[NCPU];
 
 struct proc proc[NPROC];
@@ -20,6 +21,7 @@ static void wakeup1(struct proc *chan);
 static void freeproc(struct proc *p);
 
 extern char trampoline[];  // trampoline.S
+extern pagetable_t kernel_pagetable; // vm.c
 
 // initialize the proc table at boot time.
 void procinit(void) {
@@ -34,9 +36,11 @@ void procinit(void) {
     // guard page.
     char *pa = kalloc();
     if (pa == 0) panic("kalloc");
-    uint64 va = KSTACK((int)(p - proc));
-    kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
-    p->kstack = va;
+    p->kstack_pa = (uint64)pa;
+
+   // uint64 va = KSTACK((int)(p - proc));
+   // kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
+   // p->kstack = va;
   }
   kvminithart();
 }
@@ -103,6 +107,13 @@ found:
     return 0;
   }
 
+  p->k_pagetable = kptinit();
+  uint64 va = KSTACK((int)(p - proc));
+  //kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
+
+  if (mappages(p->k_pagetable, va, PGSIZE, p->kstack_pa, PTE_R | PTE_W) != 0) panic("kptmap");
+  p->kstack = va;  
+
   // An empty user page table.
   p->pagetable = proc_pagetable(p);
   if (p->pagetable == 0) {
@@ -128,6 +139,8 @@ static void freeproc(struct proc *p) {
   p->trapframe = 0;
   if (p->pagetable) proc_freepagetable(p->pagetable, p->sz);
   p->pagetable = 0;
+  if (p->k_pagetable) freekpt(p->k_pagetable, 0);
+  p->k_pagetable = 0;
   p->sz = 0;
   p->pid = 0;
   p->parent = 0;
@@ -430,7 +443,13 @@ void scheduler(void) {
         // before jumping back to us.
         p->state = RUNNING;
         c->proc = p;
+
+        w_satp(MAKE_SATP(p->k_pagetable));  // 将内核独立页表放入寄存器satp中
+        sfence_vma();
         swtch(&c->context, &p->context);
+
+        w_satp(MAKE_SATP(kernel_pagetable));  // 恢复调度器受全局内核页表的支持
+        sfence_vma();
 
         // Process is done running for now.
         // It should have changed its p->state before coming back.
@@ -442,6 +461,8 @@ void scheduler(void) {
     }
 #if !defined(LAB_FS)
     if (found == 0) {
+      w_satp(MAKE_SATP(kernel_pagetable));
+      sfence_vma();
       intr_on();
       asm volatile("wfi");
     }

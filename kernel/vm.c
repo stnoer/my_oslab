@@ -45,6 +45,40 @@ void kvminit() {
   kvmmap(TRAMPOLINE, (uint64)trampoline, PGSIZE, PTE_R | PTE_X);
 }
 
+
+//创建内核页表
+pagetable_t kptinit() {
+  pagetable_t k_pagetable = (pagetable_t)kalloc();
+  if (k_pagetable == 0) {
+    return 0; // 分配失败
+  }
+  memset(k_pagetable, 0, PGSIZE);
+
+  // uart registers
+  kvmmap(UART0, UART0, PGSIZE, PTE_R | PTE_W);
+
+  // virtio mmio disk interface
+  kvmmap(VIRTIO0, VIRTIO0, PGSIZE, PTE_R | PTE_W);
+
+  // CLINT
+  //kvmmap(CLINT, CLINT, 0x10000, PTE_R | PTE_W);
+
+  // PLIC
+  kvmmap(PLIC, PLIC, 0x400000, PTE_R | PTE_W);
+
+  // map kernel text executable and read-only.
+  kvmmap(KERNBASE, KERNBASE, (uint64)etext - KERNBASE, PTE_R | PTE_X);
+
+  // map kernel data and the physical RAM we'll make use of.
+  kvmmap((uint64)etext, (uint64)etext, PHYSTOP - (uint64)etext, PTE_R | PTE_W);
+
+  // map the trampoline for trap entry/exit to
+  // the highest virtual address in the kernel.
+  kvmmap(TRAMPOLINE, (uint64)trampoline, PGSIZE, PTE_R | PTE_X);
+
+  return k_pagetable;//返回创建的内核页表
+}
+
 // Switch h/w page table register to the kernel's page table,
 // and enable paging.
 void kvminithart() {
@@ -132,7 +166,8 @@ int mappages(pagetable_t pagetable, uint64 va, uint64 size, uint64 pa, int perm)
   last = PGROUNDDOWN(va + size - 1);
   for (;;) {
     if ((pte = walk(pagetable, a, 1)) == 0) return -1;
-    if (*pte & PTE_V) panic("remap");
+    if (*pte & PTE_V) 
+      panic("remap");
     *pte = PA2PTE(pa) | perm | PTE_V;
     if (a == last) break;
     a += PGSIZE;
@@ -238,6 +273,24 @@ void freewalk(pagetable_t pagetable) {
       pagetable[i] = 0;
     } else if (pte & PTE_V) {
       panic("freewalk: leaf");
+    }
+  }
+  kfree((void *)pagetable);
+}
+
+//释放内核页表，释放页表但不释放叶子页表指向的物理页帧
+void freekpt(pagetable_t pagetable, int height) {
+  // there are 2^9 = 512 PTEs in a page table.
+  if(height > 2) return;//在叶子目录层结束
+  for (int i = 0; i < 512; i++) {
+    pte_t pte = pagetable[i];
+    if ((pte & PTE_V) && (pte & (PTE_R | PTE_W | PTE_X)) == 0) {
+      // this PTE points to a lower-level page table.
+      uint64 child = PTE2PA(pte);
+      freekpt((pagetable_t)child, height + 1);
+      pagetable[i] = 0;
+    } else if (pte & PTE_V) {
+      pagetable[i] = 0;
     }
   }
   kfree((void *)pagetable);
