@@ -38,9 +38,9 @@ void procinit(void) {
     if (pa == 0) panic("kalloc");
     p->kstack_pa = (uint64)pa;
 
-   // uint64 va = KSTACK((int)(p - proc));
-   // kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
-   // p->kstack = va;
+    uint64 va = KSTACK((int)(p - proc));
+    kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
+    p->kstack = va;
   }
   kvminithart();
 }
@@ -107,12 +107,10 @@ found:
     return 0;
   }
 
+  //创建进程内核表
   p->k_pagetable = kptinit();
-  uint64 va = KSTACK((int)(p - proc));
-  //kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
+  mappages(p->k_pagetable, p->kstack, PGSIZE, p->kstack_pa, PTE_R | PTE_W);
 
-  if (mappages(p->k_pagetable, va, PGSIZE, p->kstack_pa, PTE_R | PTE_W) != 0) panic("kptmap");
-  p->kstack = va;  
 
   // An empty user page table.
   p->pagetable = proc_pagetable(p);
