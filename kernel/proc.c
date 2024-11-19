@@ -36,7 +36,7 @@ void procinit(void) {
     // guard page.
     char *pa = kalloc();
     if (pa == 0) panic("kalloc");
-    p->kstack_pa = (uint64)pa;
+    p->kstack_pa = (uint64)pa;//保存分配的内核栈地址
 
     uint64 va = KSTACK((int)(p - proc));
     kvmmap(va, (uint64)pa, PGSIZE, PTE_R | PTE_W);
@@ -107,7 +107,7 @@ found:
     return 0;
   }
 
-  //创建进程内核表
+  //创建进程内核表,将内核栈映射到页表
   p->k_pagetable = kptinit();
   mappages(p->k_pagetable, p->kstack, PGSIZE, p->kstack_pa, PTE_R | PTE_W);
 
@@ -213,6 +213,9 @@ void userinit(void) {
 
   p->state = RUNNABLE;
 
+  //添加进程独立内核页表对用户页表的映射
+  sync_pagetable(p->pagetable,p->k_pagetable,0,2);
+
   release(&p->lock);
 }
 
@@ -231,6 +234,9 @@ int growproc(int n) {
     sz = uvmdealloc(p->pagetable, sz, sz + n);
   }
   p->sz = sz;
+
+  //添加进程独立内核页表对用户页表的映射
+  sync_pagetable(p->pagetable,p->k_pagetable,0,2);
   return 0;
 }
 
@@ -252,6 +258,10 @@ int fork(void) {
     release(&np->lock);
     return -1;
   }
+  
+  //添加子进程独立内核页表对用户页表的映射
+  sync_pagetable(np->pagetable, np->k_pagetable, 0, 2);
+
   np->sz = p->sz;
 
   np->parent = p;

@@ -9,6 +9,8 @@
 
 static int loadseg(pde_t *pgdir, uint64 addr, struct inode *ip, uint offset, uint sz);
 
+extern pagetable_t kernel_pagetable;
+
 int exec(char *path, char **argv) {
   char *s, *last;
   int i, off;
@@ -89,6 +91,23 @@ int exec(char *path, char **argv) {
     if (*s == '/') last = s + 1;
   safestrcpy(p->name, last, sizeof(p->name));
 
+
+
+
+  //舍弃旧页表，映射新页表
+  pagetable_t tmp = p->k_pagetable;
+  p->k_pagetable = kernel_pagetable;
+  w_satp(MAKE_SATP(kernel_pagetable));//载入全局内核页表
+  sfence_vma();
+  freekpt(tmp,0);
+  tmp = kptinit();
+  mappages(tmp, p->kstack, PGSIZE, p->kstack_pa, PTE_R | PTE_W);
+  //更新进程独立内核页表的内容
+  sync_pagetable(pagetable, tmp, 0, 2);
+  p->k_pagetable = tmp;
+  w_satp(MAKE_SATP(p->k_pagetable));//载入新页表
+  sfence_vma();
+
   // Commit to the user image.
   oldpagetable = p->pagetable;
   p->pagetable = pagetable;
@@ -96,6 +115,9 @@ int exec(char *path, char **argv) {
   p->trapframe->epc = elf.entry;  // initial program counter = main
   p->trapframe->sp = sp;          // initial stack pointer
   proc_freepagetable(oldpagetable, oldsz);
+
+
+  //sync_pagetable(p->pagetable, p->k_pagetable, 0 ,2);
 
 
   if(p->pid ==1 )
